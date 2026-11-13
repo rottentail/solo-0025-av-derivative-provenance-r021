@@ -82,14 +82,16 @@ history still records `queued`, `running`, and the terminal state.
 
 Audio-only operations:
 
-- `media_trim` with `start_seconds` and `duration_seconds`
+- `media_trim` with `start_seconds` and `duration_seconds`, or exact
+  `start_time` with `end_time` / `duration_time`
 - `audio_gain` with `db`
 - `audio_normalize` with `target_peak`
 - `audio_mix` with `secondary_gain`, `primary_weight`, and `secondary_weight`
 
 Video-only operations:
 
-- `media_trim` with `start_frame` and `frame_count`
+- `media_trim` with `start_frame` and `frame_count`, or exact `start_time`
+  with `end_time` / `duration_time`
 - `video_crop` with even `x`, `y`, `width`, and `height`
 - `video_luma_offset` with `amount`
 - `video_mirror`
@@ -154,6 +156,32 @@ Video plan:
 ]
 ```
 
+### Exact media time
+
+Seam trimming at editing-timeline precision uses integer fractions of
+seconds. Both audio and video accept `start_time` plus exactly one of
+`end_time` or `duration_time`:
+
+```json
+[
+  {
+    "type": "media_trim",
+    "start_time": "1001/30000",
+    "duration_time": "1001/30000"
+  }
+]
+```
+
+An object form `{"numerator": 1001, "denominator": 30000}` is equivalent.
+Values are evaluated as exact rationals and each boundary resolves to the
+sample or frame containing it with `floor(seconds * rate)`. Because every
+boundary is resolved from the same source origin, two selections that share
+an exact boundary neither duplicate nor drop a sample or frame. Normalization
+records `time_mode: "exact"` and `boundary_rule: "floor"` in the stored
+operation; a stored exact trim without that record is refused instead of
+silently reinterpreted. Seconds plans keep their original rounding
+interpretation and plan digests.
+
 ## Data layout
 
 ```text
@@ -188,18 +216,21 @@ depend on HTTP or the repository.
 
 ## Workflow checks
 
-The baseline intentionally has no automated test suite. Tests are deferred to
-the later task stage, which will add red/green verification coverage. The
-current production workflow checks are:
+Automated coverage is focused on exact media time; broader suites remain
+deferred. The available checks are:
 
 ```bash
 python3 scripts/workflow_checks.py ingest-media-asset
 python3 scripts/workflow_checks.py execute-rendition
 python3 scripts/workflow_checks.py verify-reproduction
+python3 scripts/exact_time_checks.py
 ```
 
-Each check starts a temporary HTTP server, generates media bytes in memory,
-exercises the public endpoints, and shuts the server down.
+Each workflow check starts a temporary HTTP server, generates media bytes in
+memory, exercises the public endpoints, and shuts the server down.
+`exact_time_checks.py` additionally asserts seam behaviour with sources whose
+samples and frames encode their position, and replays exact-time renditions
+through integrity checks.
 
 ## Environment
 

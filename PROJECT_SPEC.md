@@ -193,17 +193,58 @@ Failure:
 
 Audio plans:
 
-- `media_trim`: `start_seconds`, `duration_seconds`
+- `media_trim`: `start_seconds`, `duration_seconds` (seconds coordinates), or
+  exact `start_time` with `end_time` / `duration_time`
 - `audio_gain`: `db`
 - `audio_normalize`: `target_peak`
 - `audio_mix`: `secondary_gain`, `primary_weight`, `secondary_weight`
 
 Video plans:
 
-- `media_trim`: `start_frame`, `frame_count`
+- `media_trim`: `start_frame`, `frame_count` (frame coordinates), or exact
+  `start_time` with `end_time` / `duration_time`
 - `video_crop`: even `x`, `y`, `width`, `height`
 - `video_luma_offset`: `amount`
 - `video_mirror`: no additional parameters
+
+### Exact media time in trims
+
+A trim may instead address both audio and video with exact media time. A
+media-time value is either an object with integer `numerator` and positive
+integer `denominator` fields (seconds = `numerator / denominator`) or a
+`"num/den"` string. It is accepted at `start_time` plus exactly one of
+`end_time` or `duration_time`:
+
+```json
+{"type": "media_trim",
+ "start_time": {"numerator": 1, "denominator": 30},
+ "duration_time": {"numerator": 1, "denominator": 30}}
+```
+
+Rules:
+
+- Exact values are evaluated with rational arithmetic only; no float
+  conversion occurs, so an editing timeline's precise fractional time is
+  preserved exactly.
+- A boundary resolves to the sample or frame containing that instant:
+  `floor(seconds * rate)`, where audio rate is `sample_rate` and video rate is
+  `frame_rate = rate_numerator / rate_denominator`.
+- The end boundary is derived from the exact start plus duration (or the exact
+  end), never from already-resolved start/size indices. Adjacent selections
+  that share an exact boundary therefore resolve to the same index, so they
+  neither duplicate nor drop a sample or frame.
+- Normalization writes `time_mode: "exact"` and `boundary_rule: "floor"` into
+  the stored operation. Both are part of the plan digest.
+- A stored exact trim whose interpretation record is absent or unknown is
+  refused at execution/replay rather than replaced with a default rounding
+  policy.
+- Exact coordinates and seconds coordinates cannot be combined in one trim.
+
+Legacy seconds trims remain valid and keep their existing interpretation:
+`start_seconds` and `duration_seconds` are multiplied by the rate and rounded
+half away from zero, and the duration is floored at one frame. Plans already
+persisted with seconds fields are normalized and interpreted exactly as
+before, so their digests and reproduced bytes do not change.
 
 All numeric bounds are validated before state is queued. Processing functions
 also re-check data-dependent constraints so malformed persisted plans cannot
@@ -216,7 +257,7 @@ turn into partial output.
 | `http_api` | `avprovenance/http_api.py` | HTTP routes, body limits, status mapping |
 | `application` | `avprovenance/application.py` | Use-case orchestration and public contract |
 | `validation` | `avprovenance/validation.py` | Request and operation boundary checks |
-| `media` | `avprovenance/media` | WAV/Y4M inspection and byte operations |
+| `media` | `avprovenance/media` | WAV/Y4M inspection, exact media time, byte operations |
 | `renditions` | `avprovenance/renditions` | Plan normalization, execution, verification |
 | `storage` | `avprovenance/storage` | Atomic state, blobs, and repository methods |
 
@@ -258,15 +299,15 @@ leaking local paths.
 
 ## Validation plan
 
-The project intentionally defers automated tests to the later task stage.
-Until that stage adds a verification suite, the following production workflow
-checks are the baseline:
+The project keeps automated coverage focused on exact media time. The
+production workflow checks plus the exact-time suite are:
 
 ```bash
 python3 -m compileall -q avprovenance scripts
 python3 scripts/workflow_checks.py ingest-media-asset
 python3 scripts/workflow_checks.py execute-rendition
 python3 scripts/workflow_checks.py verify-reproduction
+python3 scripts/exact_time_checks.py
 ```
 
 The checks start an ephemeral HTTP server, generate bounded media bytes in
@@ -279,4 +320,5 @@ require network access or external media programs.
 - Persistent worker processes and cross-process task leases.
 - Authentication and multi-tenant authorization.
 - Object storage and distributed state.
-- Automated tests, which belong to the later task stage.
+- A general test suite; `scripts/exact_time_checks.py` covers exact media
+  time and seam behaviour only.

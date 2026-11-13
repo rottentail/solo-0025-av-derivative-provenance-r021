@@ -5,18 +5,36 @@ from __future__ import annotations
 from typing import Any
 
 from .errors import MediaOperationFailure
+from .timebase import EXACT_TIME_MODE, MediaTimeError, exact_trim_bounds
 from .y4m import Y4mClip, Y4mFrame, decode_y4m, encode_y4m
 
 
-def trim_video(clip: Y4mClip, operation: dict[str, Any]) -> Y4mClip:
+def _trim_bounds(clip: Y4mClip, operation: dict[str, Any]) -> tuple[int, int]:
+    if operation.get("time_mode") == EXACT_TIME_MODE or "start_time" in operation:
+        try:
+            return exact_trim_bounds(
+                operation,
+                rate_numerator=clip.rate_numerator,
+                rate_denominator=clip.rate_denominator,
+            )
+        except MediaTimeError as exc:
+            raise MediaOperationFailure(
+                "VIDEO_TRIM_TIME_INVALID",
+                str(exc),
+            ) from exc
     start = int(operation["start_frame"])
     count = int(operation["frame_count"])
+    return start, start + max(1, count)
+
+
+def trim_video(clip: Y4mClip, operation: dict[str, Any]) -> Y4mClip:
+    start, end = _trim_bounds(clip, operation)
     if start < 0 or start >= clip.frame_count:
         raise MediaOperationFailure(
             "VIDEO_TRIM_OUT_OF_RANGE",
             "The requested video trim starts outside the source.",
         )
-    end = min(clip.frame_count, start + max(1, count))
+    end = min(clip.frame_count, end)
     frames = clip.frames[start:end]
     if not frames:
         raise MediaOperationFailure(

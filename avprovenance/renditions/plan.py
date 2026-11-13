@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from fractions import Fraction
+from math import gcd
 from typing import Any, Callable
 
 from ..errors import PlanInvalid
+from ..media.timebase import EXACT_BOUNDARY_RULE, EXACT_TIME_MODE
 from ..serialization import digest_json
 from ..validation import (
     require_integer,
@@ -16,6 +19,10 @@ from ..validation import (
 
 
 MAX_OPERATIONS = 12
+MAX_MEDIA_TIME_SECONDS = 600
+MAX_TIME_DENOMINATOR = 1_000_000_000
+MAX_TIME_NUMERATOR = MAX_MEDIA_TIME_SECONDS * MAX_TIME_DENOMINATOR
+_ASCII_DIGITS = set("0123456789")
 
 
 @dataclass(frozen=True)
@@ -34,7 +41,114 @@ def _only_keys(operation: dict[str, Any], allowed: set[str], name: str) -> None:
         )
 
 
+def _media_time(value: Any, name: str) -> dict[str, int]:
+    if isinstance(value, str):
+        parts = value.split("/")
+        if (
+            len(parts) != 2
+            or not parts[0]
+            or not parts[1]
+            or not _ASCII_DIGITS.issuperset(parts[0])
+            or not _ASCII_DIGITS.issuperset(parts[1])
+            or len(parts[0]) > 24
+            or len(parts[1]) > 24
+        ):
+            raise PlanInvalid(f"{name} must be an exact integer fraction.")
+        value = {"numerator": int(parts[0]), "denominator": int(parts[1])}
+    if not isinstance(value, dict):
+        raise PlanInvalid(f"{name} must be an exact media-time object.")
+    unknown = sorted(set(value) - {"numerator", "denominator"})
+    if unknown:
+        raise PlanInvalid(
+            f"{name} contains unsupported fields.",
+            details={"fields": unknown},
+        )
+    numerator = value.get("numerator")
+    denominator = value.get("denominator")
+    if isinstance(numerator, bool) or not isinstance(numerator, int):
+        raise PlanInvalid(f"{name}.numerator must be an integer.")
+    if numerator < 0:
+        raise PlanInvalid(f"{name}.numerator must not be negative.")
+    if numerator > MAX_TIME_NUMERATOR:
+        raise PlanInvalid(
+            f"{name}.numerator is outside the allowed range.",
+            details={"maximum": MAX_TIME_NUMERATOR},
+        )
+    if isinstance(denominator, bool) or not isinstance(denominator, int):
+        raise PlanInvalid(f"{name}.denominator must be an integer.")
+    if denominator <= 0 or denominator > MAX_TIME_DENOMINATOR:
+        raise PlanInvalid(
+            f"{name}.denominator is outside the allowed range.",
+            details={"minimum": 1, "maximum": MAX_TIME_DENOMINATOR},
+        )
+    if Fraction(numerator, denominator) > MAX_MEDIA_TIME_SECONDS:
+        raise PlanInvalid(
+            f"{name} is outside the allowed range.",
+            details={"maximum_seconds": MAX_MEDIA_TIME_SECONDS},
+        )
+    divisor = gcd(numerator, denominator)
+    return {
+        "numerator": numerator // divisor,
+        "denominator": denominator // divisor,
+    }
+
+
+def _exact_trim_span(operation: dict[str, Any]) -> tuple[Fraction, Fraction]:
+    start_value = Fraction(
+        operation["start_time"]["numerator"],
+        operation["start_time"]["denominator"],
+    )
+    if "end_time" in operation:
+        end_value = Fraction(
+            operation["end_time"]["numerator"],
+            operation["end_time"]["denominator"],
+        )
+    else:
+        end_value = start_value + Fraction(
+            operation["duration_time"]["numerator"],
+            operation["duration_time"]["denominator"],
+        )
+    if end_value <= start_value:
+        raise PlanInvalid("media_trim end time must be after its start time.")
+    span = end_value - start_value
+    if span > MAX_MEDIA_TIME_SECONDS:
+        raise PlanInvalid(
+            "media_trim duration is outside the allowed range.",
+            details={"maximum_seconds": MAX_MEDIA_TIME_SECONDS},
+        )
+    return start_value, end_value
+
+
+def _exact_trim(operation: dict[str, Any]) -> dict[str, Any]:
+    _only_keys(
+        operation,
+        {"type", "start_time", "end_time", "duration_time"},
+        "media_trim",
+    )
+    if "end_time" in operation and "duration_time" in operation:
+        raise PlanInvalid(
+            "media_trim exact coordinates accept end_time or duration_time, not both."
+        )
+    normalized: dict[str, Any] = {
+        "type": "media_trim",
+        "time_mode": EXACT_TIME_MODE,
+        "boundary_rule": EXACT_BOUNDARY_RULE,
+        "start_time": _media_time(operation.get("start_time"), "start_time"),
+    }
+    if "end_time" in operation:
+        normalized["end_time"] = _media_time(operation.get("end_time"), "end_time")
+    else:
+        normalized["duration_time"] = _media_time(
+            operation.get("duration_time"),
+            "duration_time",
+        )
+    _exact_trim_span(normalized)
+    return normalized
+
+
 def _audio_trim(operation: dict[str, Any]) -> dict[str, Any]:
+    if "start_time" in operation:
+        return _exact_trim(operation)
     _only_keys(
         operation,
         {"type", "start_seconds", "duration_seconds"},
@@ -124,6 +238,8 @@ def _audio_mix(
 
 
 def _video_trim(operation: dict[str, Any]) -> dict[str, Any]:
+    if "start_time" in operation:
+        return _exact_trim(operation)
     _only_keys(
         operation,
         {"type", "start_frame", "frame_count"},
@@ -214,6 +330,16 @@ def _operation_validator(
     return validators.get(operation_type)
 
 
+def plan_digest(media_kind: str, operations: list[dict[str, Any]]) -> str:
+    """Compute the recorded digest for an already-normalized operation list."""
+    return digest_json(
+        {
+            "media_kind": media_kind,
+            "operations": operations,
+        }
+    )
+
+
 def compile_plan(
     media_kind: str,
     raw_operations: Any,
@@ -259,11 +385,6 @@ def compile_plan(
 
     return CompiledPlan(
         operations=normalized,
-        digest=digest_json(
-            {
-                "media_kind": media_kind,
-                "operations": normalized,
-            }
-        ),
+        digest=plan_digest(media_kind, normalized),
         operation_types=[item["type"] for item in normalized],
     )

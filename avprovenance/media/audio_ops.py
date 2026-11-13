@@ -6,6 +6,7 @@ import math
 from typing import Any
 
 from .errors import MediaOperationFailure
+from .timebase import EXACT_TIME_MODE, MediaTimeError, exact_trim_bounds
 from .wav import AudioClip, decode_wav, encode_wav, replace_channels
 
 
@@ -26,20 +27,36 @@ def _gain_factor(db: float) -> float:
 
 
 def trim_audio(clip: AudioClip, operation: dict[str, Any]) -> AudioClip:
-    start = int(round(float(operation["start_seconds"]) * clip.sample_rate))
-    duration = int(round(float(operation["duration_seconds"]) * clip.sample_rate))
+    start, end = _trim_bounds(clip, operation)
     if start < 0 or start >= clip.frame_count:
         raise MediaOperationFailure(
             "AUDIO_TRIM_OUT_OF_RANGE",
             "The requested audio trim starts outside the source.",
         )
-    end = min(clip.frame_count, start + max(1, duration))
+    end = min(clip.frame_count, end)
     if end <= start:
         raise MediaOperationFailure(
             "AUDIO_TRIM_EMPTY",
             "The requested audio trim produces no sample frames.",
         )
     return replace_channels(clip, (values[start:end] for values in clip.channels))
+
+
+def _trim_bounds(clip: AudioClip, operation: dict[str, Any]) -> tuple[int, int]:
+    if operation.get("time_mode") == EXACT_TIME_MODE or "start_time" in operation:
+        try:
+            return exact_trim_bounds(
+                operation,
+                rate_numerator=clip.sample_rate,
+            )
+        except MediaTimeError as exc:
+            raise MediaOperationFailure(
+                "AUDIO_TRIM_TIME_INVALID",
+                str(exc),
+            ) from exc
+    start = int(round(float(operation["start_seconds"]) * clip.sample_rate))
+    duration = int(round(float(operation["duration_seconds"]) * clip.sample_rate))
+    return start, start + max(1, duration)
 
 
 def gain_audio(clip: AudioClip, operation: dict[str, Any]) -> AudioClip:

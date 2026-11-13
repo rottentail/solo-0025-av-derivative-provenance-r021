@@ -21,6 +21,7 @@ from .media import inspect_media
 from .renditions import (
     compile_plan,
     execute_plan,
+    plan_digest,
     reproduce_output,
 )
 from .serialization import (
@@ -306,6 +307,16 @@ class MediaProvenanceApplication:
             self._finish_mismatch(
                 audit,
                 "plan_digest_drift",
+                expected_digest=output_asset.sha256,
+                expected_descriptor=expected_descriptor,
+            )
+        if (
+            plan_digest(primary_asset.kind, rendition.operations)
+            != rendition.plan_digest
+        ):
+            self._finish_mismatch(
+                audit,
+                "stored_plan_drift",
                 expected_digest=output_asset.sha256,
                 expected_descriptor=expected_descriptor,
             )
